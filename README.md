@@ -14,7 +14,7 @@ This is a universally applicable customized program for protein post-translation
 
 ### Installation
 
-Before running the code contained in "Automatic Data Processing" install the following packages:
+Before running the code contained in "Automatic Data Processing", install the following packages:
 ```
 pip install webbrowser
 pip install dash==0.36.0
@@ -27,6 +27,11 @@ pip install pandas
 pip install statistics
 pip install matplotlib
 ```
+
+### Skyline Templates
+
+Skyline Templates of all four conditions described in the manuscript is uploaded in this repository.
+https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/tree/master/Skyline%20data%20processing%20template
 
 ### Testing Data
 
