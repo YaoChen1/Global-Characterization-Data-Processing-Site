@@ -44,3 +44,10 @@ https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/tree/ma
 https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/tree/master/metal_H2O2 # mAb incubated with H2O2 and metals
 https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/tree/master/control    # mAb non-stressor control
 ```
+
+### Supplemental Recources
+
+- Jmol is needed for visualizaiton of the 3-D molecular model of modified protein 
+ - http://jmol.sourceforge.net/
+- Download the protein X-ray crystallography data from Protein Data Bank
+ - https://www.rcsb.org/
