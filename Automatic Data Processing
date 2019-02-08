@@ -1,0 +1,2085 @@
+'''
+Author: Yao Chen
+Version: Last updated 1/17/2019
+Note: this code is an attachment of Yao Chen's first author publication: Rapid Global Characterization 
+        of Human IgG1 under Oxidative Stresses — Combining dual independent protease digestions and LC-HRMS 
+        DIA and DDA
+Funtion: "Following peptide-matching in Skyline templates, all transitions were processed by Global Characterization 
+    Site—an universal data processing application for protein modifications—which is capable of processing data of 
+    proteins digested by any digestive enzymes (or any co-digestions), proteins with any number of subunits, and any 
+    numbers of any chemical modifications. The site will allow users to see and download interactable modification 
+    trending plots in high resolution of every discovered peptides, generating sortable and downloadable modification 
+    tables, and produce Jmol code for visualization of degrees of modifications on a global level. "
+'''
+
+import base64
+import datetime
+import io
+import webbrowser
+import dash
+import dash_table
+from dash.dependencies import Input, Output, State
+import dash_core_components as dcc
+import dash_html_components as html
+import dash_table_experiments as dt
+import plotly.graph_objs as go
+import pandas as pd
+import statistics as st
+import dash_table_experiments as dt
+from matplotlib import cm
+
+external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
+
+app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
+
+app.scripts.config.serve_locally = True
+
+
+
+'''
+Purpose: generate a list 'pep_pos_int' with the structure of [[begin_pos, end_pos],.......] of a protein
+Input: protein: a string, one of the protein under "Protein" column in the dataframe
+       tryp_df: a dataframe of primary or secondary digests
+Output: a list of all discovered peptides (peptide position on the protein could be randomized) 
+        in a protein with the format of
+        [[start pos #, end pos #],[start pos #, end pos #]......]
+'''
+def pep_pos_list (protein, tryp_df):
+    #creating a new column combining begin pos with end position separated by a ',', the data type is string
+    tryp_df['begin_end'] = tryp_df['Begin Pos'].astype(str) +','+ tryp_df['End Pos'].astype(str)
+    # convert the begin_end column to a list with unique elements
+    pep_pos = tryp_df[tryp_df.Protein == protein].begin_end.unique().tolist()
+    
+    pep_pos_int = []
+    # generate a list 'pep_pos_int' with the structure of [[begin_pos, end_pos],.......] of a protein
+    for i in pep_pos:
+        begin, end = i.split(',')
+        pep_pos_int.append([int(begin),int(end)]) 
+        
+    return pep_pos_int
+
+
+'''
+Purpose: 1. maximize protein coverage in primary digestion, giving priority to non-mis-cleaved peptide
+         2. extract redundant peptide, store them in a separate list (y)
+         Note: this peptide selection for max coverage program works on peptides upto 1-miscleavage.
+                When there are peptides with more than 1 miscleages, these peptides might be reduntant
+                but some will be selected into the pep_max_cov list
+Input: a list of all discovered peptides (peptide position on the protein could be randomized) 
+        in a protein with the format of [[start pos #, end pos #],[start pos #, end pos #]......], 
+        which is the output of function "pep_pos_list"
+Output: a list consist of three sublists/dictionary [pep_max_cov, pep_redundant, pep_gap, pep_dict]
+        pep_max_cov: a list of peptide in the primary digest that have the max coverage over a protein
+                     non-mis-cleaved peptides are preferably selected in this list, same format as input
+        pep_redundant: a list of redundant peptides, same format as input
+        pep_gap: a list of gaps that the digest didn't cover, format as input. for example if the pep_max_cov contains
+                 the following segment: [...[305, 323], [330, 337]...], the pep_gap would contain a gap: 
+                 [...[324, 329]...]
+        pep_dict: a dictionary format of the input, namely all the peptides in the input
+                format: {start_pos:[end_pos1, en_pos2,...],......}
+'''
+def mis_cleave_sep (pep_pos):
+    
+    pep_dict = {}
+    pep_max_cov=[]
+    pep_redundant=[]
+    pep_gap = []
+    for i in range (len(pep_pos)):
+        if pep_pos[i][0] in pep_dict.keys():
+            pep_dict[pep_pos[i][0]].append(pep_pos[i][1])
+        else: pep_dict[pep_pos[i][0]] =[pep_pos[i][1]]
+            
+    key_list = sorted(pep_dict.keys())
+    for i in range (len(pep_dict)-1):
+        pos = pep_dict[key_list [i]][0]
+        min1 = abs(pos-key_list [i+1])
+        for a in pep_dict[key_list [i]]:
+            if ((a-key_list [i+1]) < min1):
+                pos = a
+        pep_max_cov.append([key_list [i], pos])
+    
+    pep_max_cov.append([key_list [-1], pep_dict[key_list [-1]][-1]]) 
+            
+    for i in range (len(pep_max_cov)):
+        for a in pep_dict[key_list[i]]:
+            if a != pep_max_cov[i][1]:
+                pep_redundant.append([pep_max_cov[i][0], a])
+       
+    for t in range (len(pep_max_cov)-1):
+        if pep_max_cov[t][1]<pep_max_cov[t+1][0]:
+            if pep_max_cov[t][1]!= (pep_max_cov[t+1][0]-1):
+                pep_gap.append([pep_max_cov[t][1]+1,pep_max_cov[t+1][0]-1])
+            
+    return [pep_max_cov, pep_redundant, pep_gap, pep_dict]
+
+'''
+Purpose: for uncovered area in primary digestion
+            search in secondary digestion file, maximize coverage, giving priority to 
+            non-miscleaved peptide, and minimize secondary digest peptide overlap with primary digest
+         Note: this peptide selection for max coverage program works on peptides upto 1-miscleavage.
+                When there are peptides with more than 1 miscleages, these peptides might be reduntant
+                but are still selected into the pep_max_cov list
+Input: protein_1st: a string, name of the protein user chosen from the primary digestion file
+       df_1st: a dataframe of the primary digestion file
+       protein_2nd: a string, name of the protein user chosen from the secondary digestion file
+       df_2nd: a dataframe of the secondary digestion file 
+Output: a dictionary
+            Keys: tuples of uncovered area in primary digestion. tuple:(gap_start_pos, gap_end_pos)
+            values: list of list of peptides in secondary digestion that can fill the uncovered area in the
+                    primary digestion [...[secondary_peptide_start_pos, secondary_peptide_end_pos,]...]
+'''
+def fill_primary_gap_with_secondary (protein_1st, df_1st, protein_2nd, df_2nd):
+    pep_pos_1st = pep_pos_list(protein_1st, df_1st)
+    pep_pos_2nd = pep_pos_list(protein_2nd, df_2nd)
+    pep_max_cov_1st = mis_cleave_sep(pep_pos_1st)[0] #list of max coverage peptides in the primary digestion file
+    pep_gap_1st = mis_cleave_sep(pep_pos_1st)[2] #list of gaps in the primary digestion
+    pep_max_cov_2nd = mis_cleave_sep(pep_pos_2nd)[0] #list of max coverage peptides in the secondary digestion file
+    
+    dict_gap_overlap = {} # A dictionary store all peptides in the 2nd digestion file that have over lap with 
+                            # gaps in the primary digestion file 
+                            # keys: gaps in the primary digestion file (tuples)
+                            # values: secondary peptides overlap with the gap in the key ([..[start_pos, end_pos]..])
+    for i in pep_gap_1st:
+
+        dict_gap_overlap[tuple(i)] = []    
+        for t in pep_max_cov_2nd:
+            # put all overlap peptides in the temp dictionary
+            # select peptides with minimum overlap with the gap, avoid too much overlap that might
+                # eclipse the info in the primary digest
+            if (t[0]<=i[0] and t[1]>i[0] and t[1]<=i[1]) or (t[0]>=i[0] and t[1]<=i[1]) or (t[0]>=i[0] and t[0]<i[1] and t[1]>=i[1]) or (t[0]<=i[0] and t[1]>=i[1]):
+                    if t not in dict_gap_overlap[tuple(i)]:
+                        dict_gap_overlap[tuple(i)].append(t)
+    
+        # minimize secondary digest peptide overlap with primary digest
+        pep_dict = []
+        pep_dict1 = []
+        for p in dict_gap_overlap[tuple(i)]:
+            if p[0]<=i[0]:
+                pep_dict.append(p)
+            if p[1]>=i[1]:
+                pep_dict1.append(p)
+        if len(pep_dict)>1:
+            for a in range(len(pep_dict)-1):
+                dict_gap_overlap[tuple(i)].remove(pep_dict[a])
+        if len(pep_dict1)>1:
+            del pep_dict1[0]
+            for b in pep_dict1:
+                dict_gap_overlap[tuple(i)].remove(b)
+    return dict_gap_overlap
+
+
+'''
+Purpose: This function takes in a full qualified dataframe, and add three columns to the dataframe. 
+            Exception will be given when user do not have \'Peptide Modified Sequence\'
+            and \'Peptide Modified Sequence Full Names\' in the uploaded spreadsheet
+Input: a full qualified dataframe
+Output: a dataframe adding three columns
+        modification_full_name: modification full name in the column of "Peptide Modified Sequence Full Names" of a peptide
+        mod_name_mass: modified amino acid and modification mass change of "Peptide Modified Sequence" of a peptide
+        mod_pos: modification position indexed by the column "Begin Pos" of a peptide
+'''
+def find_modifications (tryp_df):
+    tryp_df = tryp_df.reset_index()
+    tryp_df = tryp_df.drop('index',axis = 1)
+    ALPHABET = 'QWERTYUIOPASDFGHJKLZXCVBNM'
+    tryp_df.loc[:,'modification_full_name'] = ' '
+    tryp_df.loc[:,'mod_name_mass'] = ' '
+    tryp_df.loc[:,'mod_pos'] = ' '
+    for i in range(len(tryp_df)):
+        mod_full_name = tryp_df.loc[i,'Peptide Modified Sequence Full Names']
+        mod_name_mass = tryp_df.loc[i,'Peptide Modified Sequence']
+        pos1,pos2,pos3,pos4,pos5 = [],[],[],[],[]
+        k = tryp_df.loc[i,'Begin Pos']
+        for a in range(len(mod_full_name)):
+            if mod_full_name[a] =='[':
+                pos1.append(a-1)
+            if mod_full_name[a] ==']':
+                pos2.append(a+1)
+        for b,c in zip(pos1, pos2):
+            tryp_df.loc[i,'modification_full_name']+=mod_full_name[b:c]+' '
+        for d in range (len(mod_name_mass)):
+
+            if mod_name_mass[d] in ALPHABET:
+                k+=1
+            if mod_name_mass[d] =='[':
+                pos3.append(d-1)
+                tryp_df.loc[i,'mod_pos'] += str(k-1)+' '
+            if mod_name_mass[d] ==']':
+                pos4.append(d+1)
+
+        for e,f in zip(pos3, pos4):
+            tryp_df.loc[i,'mod_name_mass'] += mod_name_mass[e:f]+' '
+
+#      except Exception as e:
+#         print ('You must include \'Peptide Modified Sequence\' and \'Peptide Modified Sequence Full Names\' in your spreadsheet')
+#         return html.Div([
+#             'You must include \'Peptide Modified Sequence\' and \'Peptide Modified Sequence Full Names\' in your spreadsheet'
+#         ])
+    return tryp_df
+
+'''
+Purpose: filter dataframe (df) by begin_pos and end_pos given by the list 
+Input: tryp_df: dataframe from user selected spread sheet
+        list_in_list: [...[begin_pos, end_pos]...] of peptides
+Output: new dataframe with only begin_pos and end_pos required by the "list_in_list"
+'''
+def filter_df_by_pos (tryp_df, list_in_list):
+    tryp_df['begin_end'] = tryp_df['Begin Pos'].astype(str) +','+ tryp_df['End Pos'].astype(str)
+    b=[]
+    for c in list_in_list:
+        d = str(c[0])+','+str(c[1])
+        b.append(d)
+    k=[]
+    for e in b:
+        k.append(tryp_df[ tryp_df['begin_end'] == e])
+
+    if k == []: return None
+        
+    new_df = pd.concat(k)
+    new_df = new_df.reset_index()
+    new_df = new_df.drop('index', axis = 1)
+    return new_df
+
+
+'''
+Purpose: this method is used in callback methods. After user choose proteins, constant modifications, this method add 
+        two more columns to the data frame. One column contain peptide sequences stripped all modifications.
+        The other column contain all modified peptides stripped all modifications (excluding peptides with constant
+        modification, or none modified peptides). 
+            pep_pos_seq: newly added column with all peptide pos, sequence, and name (strip modifications)
+            pep_pos_mod: newly added column with all modified (rule out constant mod) peptide pos, sequence 
+                         and name (strip modification). None modified or constantly modified peptides are 
+                         left empty in the column
+Input: df: data frame parsed by "parse_contents(contents, filename, date)" method. The dataframe contains the three added
+        columns from "find_modifications (tryp_df)" method.
+       primary_digest_dropdown: a list of all user selected proteins from the dropdown
+       maxCoverage_redundant_secondary: wheather is method is used for maxCoverage peptides, redundant peptides, 
+                                       or secondary peptides
+       sel_const_mod: a list of all constant modifications selected by user
+Output: a new dataframe added with two columns descried in 'purpose' 
+'''
+def sep_mod_pep (df, 
+                 primary_digest_dropdown, 
+                 maxCoverage_redundant_secondary,
+                 sel_const_mod ):
+    new = []
+    ALPHABET = 'QWERTYUIOPASDFGHJKLZXCVBNM'
+    for pro in primary_digest_dropdown:
+        pep_pos = pep_pos_list(pro, df)
+        if maxCoverage_redundant_secondary == 'redundant':
+            max_cov_list = mis_cleave_sep(pep_pos)[1]
+        else:
+            max_cov_list = mis_cleave_sep(pep_pos)[0]
+        new_df = filter_df_by_pos(df, max_cov_list)
+        new.append(new_df)
+    fil_df = pd.concat(new)
+    fil_df = fil_df.reset_index()
+    fil_df = fil_df.drop('index', axis = 1)
+    
+    #generate an empty column with all peptide pos, sequence, and name (strip modification)
+    fil_df.loc[:,'pep_pos_seq'] = ''
+    #generate an empty column with all modified (rule out constant mod) peptide pos, sequence and name (strip modification)
+    fil_df.loc[:,'pep_pos_mod'] = ''
+    fil_df = fil_df.reset_index()
+    fil_df = fil_df.drop('index',axis = 1)
+    
+    for i in range(len(fil_df)):
+        #generate a column with all peptide pos, sequence, and name (strip modification)
+        fil_df.loc[i,'pep_pos_seq'] += str(fil_df.loc[i,'Begin Pos'])
+        fil_df.loc[i,'pep_pos_seq']+=','
+        fil_df.loc[i,'pep_pos_seq']+=str(fil_df.loc[i,'End Pos'])
+        fil_df.loc[i,'pep_pos_seq']+=' '
+        
+        seq = ''
+        for a in fil_df.loc[i,'Peptide Modified Sequence']:
+            if a in ALPHABET:
+                seq+=a
+        fil_df.loc[i,'pep_pos_seq'] += seq
+        fil_df.loc[i,'pep_pos_seq']+=' ' 
+        fil_df.loc[i,'pep_pos_seq']+=fil_df.loc[i,'Protein']
+        
+        #generate a column with all modified (rule out constant mod) peptide pos, sequence and name (strip modification)
+        mod_list = fil_df.loc[i,'mod_name_mass'].split(' ')
+        modList=[]
+        for a in mod_list:
+            if (a not in sel_const_mod) and (a!=''):
+                modList.append(a)
+        
+        if len(modList)!=0:
+            fil_df.loc[i,'pep_pos_mod'] += str(fil_df.loc[i,'Begin Pos'])
+            fil_df.loc[i,'pep_pos_mod']+=','
+            fil_df.loc[i,'pep_pos_mod']+=str(fil_df.loc[i,'End Pos'])
+            fil_df.loc[i,'pep_pos_mod']+=' ' 
+            
+            mod_seq = ''
+            for b in fil_df.loc[i,'Peptide Modified Sequence']:
+                if b in ALPHABET:
+                    mod_seq+=b
+            fil_df.loc[i,'pep_pos_mod']+=mod_seq
+            fil_df.loc[i,'pep_pos_mod']+=' ' 
+            fil_df.loc[i,'pep_pos_mod']+=fil_df.loc[i,'Protein']
+    
+    return fil_df
+    
+
+'''
+Purpose: this method is generally used in a callback function to prepare for generation of graphs or tables. This function
+        will take in a data frame that is processed by "parse_contents(contents, filename, date)" method and "sep_mod_pep"
+        method. This method will calculate average percentage of modifications of a peptide with any replicates. This 
+        will also calculate stdev of these replicates as well. When the peptide has no modification, it'll return 0 for
+        all time points and 0 stdev for all time points as well. 
+Input: fil_df: data frame that is processed by the two method: "parse_contents(contents, filename, date)" and "sep_mod_pep"
+        method
+        peptide_name: a peptide chosen by the user from the id = 'primary_max_cov_pep_dropdown' dropdown, all "peptide
+        names" are from "pep_pos_seq" or "pep_pos_mod" column in the data frame. The two columns were generated from 
+        "sep_mod_pep" method
+Output: a list with the following two components:
+        1. a dictionary format of {'Peptide Modified Sequence1':[[avg%mod t1, avg%mod t2,...],[stdev% t1, stdev% t2,...]],
+        'Peptide Modified Sequence2':[[avg%mod t1, avg%mod t2,...],[stdev% t1, stdev% t2,...]],......}
+        2. a list of unique time points
+'''
+def get_percentage_modification_and_std (fil_df, peptide_name):   
+    #new_mod_df contains a df of user selected modified peptide
+    #new_df contains a df of user selected peptides
+    new_mod_df = fil_df[fil_df['pep_pos_mod'] == peptide_name]
+    new_df = fil_df[fil_df['pep_pos_seq'] == peptide_name]
+
+    #a time_point list eg['0','0.1','1','1.1'...]
+    t_pt =[]
+    for a in new_mod_df.columns.values:
+        if a[0] in '1234567890':
+            t_pt.append(a)
+    #a time_point list eg[0, 0, 1, 1,...]
+    t_point = []
+    for b in t_pt:
+        t_point.append(int(b.split('.')[0]))
+    
+    #t_point_unique is a list store all unique time points
+    length = {}
+    t_point_unique=[]
+    for l in t_point:
+        length[l]=[]
+    for pt in length.keys():
+        t_point_unique.append(pt)
+    
+    #pep_mod_sum stores the summed (modified) intensity of a peptide, each are a non-averaged timepoint 
+    #pep_sum stores the summed intensity of a peptide, each are a non-averaged timepoint 
+    pep_mod_sum = []
+    pep_sum = []
+    for b in t_pt:
+        pep_mod_sum.append(new_mod_df[b].sum())
+        pep_sum.append(new_df[b].sum())
+
+    pep_dict = {}
+
+    #new_mod_df store all peptides that's actually chemically modified (no user chosen constant mod)
+    new_mod_df = new_mod_df[new_mod_df['pep_pos_mod']!=' ']
+
+    #if user selected peptide does have chemical modification (excluding user specified constant mod), 
+    # get a dictionary with all modification peptide as keys, and their summed intensity over different
+    # time point as values
+
+    if len(new_mod_df)!=0:
+        for a in new_mod_df.loc[:, 'Peptide Modified Sequence'].unique():
+            pep_dict[a]=[]
+            for c in t_pt:
+                pep_dict[a].append(new_mod_df[new_mod_df['Peptide Modified Sequence']==a][str(c)].sum())
+                                                                    #a dictionary with keys of modified peptides' name
+                                                                        # and values of a list of summed intensity
+                                                                        # intensity time point align with t_pt list
+        pep_dict['summed_modification'] = pep_mod_sum
+    #if user selected peptide is not modified, return a dictionary with peptide sequence as name and all 0
+    # for all time point as percentage of modification
+    else:
+        sequence = peptide_name.split (' ')[1]
+        l= len(length)
+        g=[0 for n in range (l)]
+        return [{sequence: [g,g]}, t_point_unique]
+
+    #calculate percentage of modification for each peptide and sum of modifications. All time points are not averaged yet
+    pep_percentage_dict = {}
+    for x in pep_dict.keys():            
+        pep_percentage_dict[x] = []
+        for a in range (len(t_pt)):
+            pep_percentage_dict[x].append(pep_dict[x][a]/pep_sum[a]*100)
+
+    # pep_dict_ave_std: a dictionary {peptide name : [[%mod_time_point1, mod_std%], [%mod_time_point2, mod_std%]]}
+    #  %mod = modified peptide intensity / sum of this peptide intensity *100%
+    pep_dict_ave_std = {}
+    for n in pep_percentage_dict.keys():
+        intensity = []
+        track = t_point[0]
+        for i in range(len(t_point)):
+            if t_point[i] == track:
+
+                intensity.append(pep_percentage_dict[n][i])
+                track = t_point[i]
+                
+            if t_point[i] != track or i == len(t_point)-1:
+                if n not in pep_dict_ave_std.keys(): 
+                    pep_dict_ave_std[n] = [[[]],[[]]]
+                    pep_dict_ave_std[n][0][0] = st.mean(intensity)
+                    if len(intensity)<2:
+                        pep_dict_ave_std[n][1][0] = 0
+                    else: 
+                        pep_dict_ave_std[n][1][0] = st.stdev(intensity)
+                    intensity.clear()
+                    intensity.append(pep_percentage_dict[n][i])
+                    
+                else:
+                    pep_dict_ave_std[n][0].append(st.mean(intensity))
+                    if len(intensity)<2:
+                        pep_dict_ave_std[n][1].append(0)
+                    else:
+                        pep_dict_ave_std[n][1].append(st.stdev(intensity))
+                    intensity.clear()
+                    intensity.append(pep_percentage_dict[n][i])
+                track = t_point[i]    
+    return [pep_dict_ave_std, t_point_unique]
+ 
+    
+
+'''
+Purpose: making new dataframe for the table generation. Each peptide only have one row. The final table to the user end will
+        show start and end peptide postions, unmodified peptide sequence, pooled modifications of a peptide, pooled 
+        modification positions of a peptide, pooled modification name of a peptide, "mean +/- stdev" of this peptide in all
+        time points, each time point is one column
+Input: "fil_df": a data frame that is processed by the two method: "parse_contents(contents, filename, date)" and "sep_mod_pep"
+        method. If user input a secondary digestion, use"fill_primary_gap_with_secondary" method to find out the gap-filling
+        pepitdes and concatenant these peptides to the input dataframe
+        "user_x_axis_title": user input x axis title from the first figure, div id is :"user_x_axis_title"
+Output: a list of two dataframes, the first dataframe is the one that is presented to the user, the second is the intermediate
+        dataframe that contains more raw info, which is used for the generation of the first dataframe
+'''
+def make_new_df_for_table (fil_df, user_x_axis_title):
+    table_index = ['Begin Pos','End Pos', 'Protein', 'Peptide Modified Sequence', 'modification_full_name', 'mod_name_mass', 'mod_pos', 'pep_pos_seq', 'pep_pos_mod','begin_end']
+    fil_df.columns = fil_df.columns.astype(str)
+    t_dict = {}
+    for t in fil_df.columns.values:
+        if t[0] in '1234567890':
+            t_dict[t.split('.')[0]]=''
+    time_point_list = t_dict.keys()
+    new_df = fil_df.drop_duplicates(subset='pep_pos_seq', keep="last")
+    for a in new_df.columns:
+        if a not in table_index:
+            del new_df[a]
+    unique_peptide_df = []
+    
+    new_df = new_df.reset_index()
+    new_df = new_df.drop('index',axis = 1)
+    new_df.loc[:,'Sequence']=''
+    new_df.loc[:,'Modifications']=''
+    new_df.loc[:,'Modification Positions']=''
+    new_df.loc[:,'Modification names']=''
+    for t in time_point_list:        
+        title = 'mean (stdev) modification% at ' + t +' '+ user_x_axis_title
+        new_df.loc[:, title]=''
+        
+    for a in range(len(new_df)):
+        pep_pos_seq = new_df.loc[a, 'pep_pos_seq']
+        seg_fil_df = fil_df[fil_df.loc[:,'pep_pos_seq'] == pep_pos_seq]
+        for f, g, h in zip (seg_fil_df.loc[:,'mod_name_mass'], seg_fil_df.loc[:,'mod_pos'], seg_fil_df.loc[:,'modification_full_name']):
+            mod, name, pos =[],[],[]
+            for x in f.split(' '):
+                if x is not '':
+                    mod.append(x)
+            for y in g.split(' '):
+                if y is not '':
+                    pos.append(y)
+            for z in h.split(' '):
+                if z is not '':
+                    name.append(z)
+            for u,i,o in zip(mod, pos, name):
+                if i not in new_df.loc[a,'Modification Positions'] or u not in new_df.loc[a,'Modifications']:
+                    new_df.loc[a,'Modifications']+=u+' '
+                    new_df.loc[a,'Modification Positions']+=i+' '
+                    new_df.loc[a,'Modification names']+=o+' '
+        sequence = pep_pos_seq.split(' ')[1]
+        new_df.loc[a, 'Sequence'] =  sequence
+        pep_pos_seq
+        mean_pep_dict = get_percentage_modification_and_std (fil_df, new_df.loc[a, 'pep_pos_seq'])[0]
+        if 'summed_modification' in mean_pep_dict.keys():
+            stdev_pep_dict = mean_pep_dict['summed_modification'][1]
+            mean_pep_list = mean_pep_dict['summed_modification'][0]
+        else:
+            stdev_pep_dict = [0]*len(time_point_list) 
+            mean_pep_list = [0]*len(time_point_list)
+        for c,d,e in zip(mean_pep_list,stdev_pep_dict,time_point_list):
+            new_df.loc[a,'mean (stdev) modification% at ' + e +' '+ user_x_axis_title] = str(round(c,2))+' +/- '+str(round(d,2))
+    
+    #prepare a smaller version for presentation to the user, the old version of data frame still passed out as return
+    del_index = ['Modification names', 'index','Peptide Modified Sequence', 'modification_full_name', 'mod_name_mass', 'mod_pos', 'pep_pos_seq', 'pep_pos_mod','begin_end']
+    new_new_df = new_df.reset_index()
+    
+    for x in del_index:
+        del new_new_df[x]
+    
+    return [new_new_df, new_df]
+
+'''    
+a method used in the table generation section to get all the unique modifications in the dataframe
+input: a dataframe generated in the dropdown callback function for table filtering
+output: a list with two parameters
+        the first is a list of all modifications like ['M[+16]', 'W[+16]'...]
+        the second is a list of all modified AA like ['M', 'W', ...]
+'''
+def get_all_mod_list (df):
+    mod_AA_dict = {}
+    mod_AA_list = []
+    AA_dict={}
+    AA_list=[]
+    for f in df.loc[:,'mod_name_mass'].unique():
+        for y in f.split(' '):
+            if y!='' and y[0].upper() in 'QWERTYUIOPASDFGHJKLZXCVBNM':
+                mod_AA_dict[y]=''
+                AA_dict[y[0]]=''
+    
+    for x in mod_AA_dict.keys():
+        mod_AA_list.append(x)
+    for y in AA_dict.keys():
+        AA_list.append(y)
+    return [mod_AA_list, AA_list]
+    
+    
+'''
+sequence alignment method only apply for 1HZH 
+input a df, output df
+changing the df 'Begin Pos' and 'End Pos'
+'''
+   
+def sequence_align (df):
+    align={}
+    for n in range (1,52):
+        align[n]=n
+    align[52]=53
+
+    align2={}
+    for n in range (55,83):
+        align2[n]=(n-1)
+    align.update(align2)
+
+    align3={}
+    for n in range (86,102):
+        align3[n]=(n-4)
+    align.update(align3)
+
+    align4={}
+    for n in range (105,138):
+        align4[n]=(n-7)
+    align.update(align4)
+
+    align5={}
+    for n in range (138,160):
+        align5[n]=(n-5)
+    align.update(align5)
+
+    align[160]=156
+    align[161]=157
+
+    align6={}
+    for n in range (162,170):
+        align6[n]=n
+    align.update(align6)
+
+    align7={}
+    for n in range (170,180):
+        align7[n]=n+1
+    align.update(align7)
+
+    align8={}
+    for n in range (180,199):
+        align8[n]=n+2
+    align.update(align8)
+
+    align[199]=203
+
+    align9={}
+    for n in range (200,218):
+        align9[n]=n+5
+    align.update(align9)
+
+    align10={}
+    for n in range (219,225):
+        align10[n]=n+6
+    align.update(align10)
+
+    align[225]=232
+
+    align11={}
+    for n in range (226,284):
+        align11[n]=n+9
+    align.update(align11)
+
+    align[284]=295
+    align[285]=296
+
+    align12={}
+    for n in range (286,302):
+        align12[n]=n+13
+    align.update(align12)
+
+
+    align13={}
+    for n in range (302,341):
+        align13[n]=n+15
+    align.update(align13)
+
+    align14={}
+    for n in range (341,346):
+        align14[n]=n+16
+    align.update(align14)
+
+    align15={}
+    for n in range (346,362):
+        align15[n]=n+17
+    align.update(align15)
+
+    align16={}
+    for n in range (362,384):
+        align16[n]=n+19
+    align.update(align16)
+
+    align17={}
+    for n in range (384,388):
+        align17[n]=n+21
+    align.update(align17)
+
+    align[388]=410
+    align[389]=411
+
+    align18={}
+    for n in range (390,405):
+        align18[n]=n+24
+    align.update(align18)
+
+    align[405]=430
+
+    align19={}
+    for n in range (406,452):
+        align19[n]=n+27
+    align.update(align19)
+    
+    align20={}
+    for n in range (101,105):
+        align20[n] = 97
+    align.update(align20)
+    
+    align['']=''
+    
+    df_list=[]
+   
+    list1 = df.Protein.unique().tolist()
+    light_dict,heavy_dict={},{}
+    for a in list1:
+        if 'light' in a.lower():
+            light_dict[a]=0
+        else:
+            heavy_dict[a]=0    
+    
+    heavy_list,light_list=[],[]
+    for b in heavy_dict.keys():
+        heavy_list.append(b)
+    for c in light_dict.keys():
+        light_list.append(c)
+    
+    for d in heavy_list:
+        heavy_df = df.loc[df.loc[:,'Protein'] == d]
+        for e in heavy_df.index:
+            heavy_df.loc[e,'Begin Pos'] =  align[heavy_df.loc[e,'Begin Pos']+1]
+            heavy_df.loc[e,'End Pos'] = align[heavy_df.loc[e,'End Pos']+1]
+        df_list.append(heavy_df)
+    
+    for l in light_list:
+        light_df = df.loc[df.loc[:,'Protein'] == l]
+        for f in light_df.index:
+            light_df.loc[f,'Begin Pos'] += 1 
+            light_df.loc[f,'End Pos'] += 1 
+        df_list.append(light_df)
+    new_df = pd.concat(df_list)
+    new_df = new_df.reset_index()
+    new_df = new_df.drop('index', axis = 1)
+    return new_df 
+    
+    
+    
+'''
+App layout
+'''
+app.layout = html.Div([
+    
+    html.H2('Global Characterization Data Processing Site V. 0.1 (beta)',
+            style={
+                'position': 'relative',
+                'top': '0px',
+                'left': '10px',
+                'font-family': 'Dosis',
+                'display': 'inline',
+                'font-size': '4.0rem',
+                'color': '#4D637F'
+            }),
+    html.Br(),
+    html.H4('Author: Yao Chen',
+                style={
+                    'position': 'relative',
+                    'top': '0px',
+                    'left': '10px',
+                    'font-family': 'Dosis',
+                    'display': 'inline',
+                    'font-size': '2.0rem',
+                    'color': '#4D637F'
+                }),
+    html.Br(),
+    html.P('Due to heavy computing processes, steps below might take 0.5-1 minute.', style ={'margin': '10px'}),
+    # two file dropboxes
+    html.Div([
+        html.Div(
+            dcc.Upload(
+                id='upload-data',
+                children=html.Div([
+                    'Drag and Drop Your Primary Digestion File or ',
+                    html.A('Select Files')
+                ]),
+                style={
+                    'width': '95%',
+
+                    'height': '60px',
+                    'lineHeight': '60px',
+                    'borderWidth': '1px',
+                    'borderStyle': 'dashed',
+                    'borderRadius': '5px',
+                    'textAlign': 'center',
+                    'margin': '10px'
+                },
+            ), style = {'display':'inline-block'}
+        ),
+        
+        html.Div(
+            dcc.Upload(
+                id='upload-data_2',
+                children=html.Div([
+                    'Drag and Drop Your Secondary Digestion File or ',
+                    html.A('Select Files')
+                ]),
+                style={
+                    'width': '95%',
+
+                    'height': '60px',
+                    'lineHeight': '60px',
+                    'borderWidth': '1px',
+                    'borderStyle': 'dashed',
+                    'borderRadius': '5px',
+                    'textAlign': 'center',
+                    'margin': '10px'
+                },
+            ), style = {'display':'inline-block'}
+        )
+        
+    ], style = {'width' : '100%', 'height' : '100%', 'display' :'inline-block', 'position':'relative'}),
+
+    
+    html.Div([
+        html.P('Select target protein(s) for data processing. Select same protein(s) in the same order if secondary digestion file uploaded.'),        
+    ],style = {'margin': '10px'}),
+    
+    #protein selection dropdown
+    html.Div([
+        html.Div([
+            dcc.Dropdown(id = ('primary_digest_dropdown'), multi = True)            
+        ],style = {'width' : '45%', 'height' : '100%', 'display' :'inline-block', 'position':'relative'}),
+        html.Div([
+            dcc.Dropdown(id = ('secondary_digest_dropdown'), multi = True)
+        ],style = {'width' : '45%', 'height' : '100%', 'display' :'inline-block', 'position':'relative'}),
+        ],style = {'margin': '10px', 'width' : '60%', 'height' : '100%', 'display' :'inline-block', 'position':'relative'}
+    ),
+    
+    #The first graph showing % modification of peptides in the primary digestion 
+    # file that is selected in global characterization
+    html.Br(),
+    
+    html.Div([
+        html.Div([
+            html.P('Select peptide constant modification.')
+        ],style = {'margin': '10px'}),
+        html.Div([
+            dcc.Dropdown (id = ('sel_const_mod'), value = [], multi = True),
+        ],style = {'width' : '45%', 'height' : '100%', 'display' :'inline-block', 'position':'relative'})
+    ],style = {'margin': '10px'}),
+    html.Div([
+        html.Div([
+           html.H4 ('Plot of % modifications. All pepitdes here are used for generation of the Global Characterization Map.'),           
+            
+            html.P ('Select one peptide for ploting')
+        ]),
+        html.Div([
+           dcc.Dropdown(id = 'primary_max_cov_pep_dropdown', style = {'width' : '68%', 'position':'relative'}),
+           dcc.RadioItems(
+               id = 'all_or_modified_pep',
+               options = [{'label' : i, 'value' : i} for i in ['Show all peptides', 'Show peptides with modification(s)']],
+               value = 'Show all peptides',
+               labelStyle = {'display':'inline-block'}            
+           ),
+           html.P('Select X-axis scale'),
+           dcc.RadioItems(
+               id = 'sel_x_axis_scale',
+               options = [{'label' : i, 'value' : i} for i in ['linear', 'log']],
+               value = 'linear',
+               labelStyle = {'display':'inline-block'}            
+           ),
+           html.P('Select Y-axis scale'),
+           dcc.RadioItems(
+               id = 'sel_y_axis_scale',
+               options = [{'label' : i, 'value' : i} for i in ['linear', 'log']],
+               value = 'linear',
+               labelStyle = {'display':'inline-block'}            
+           ), 
+        ]),
+    ],style = {'margin': '10px'}),
+    html.Div([
+        html.Div([
+            html.P('Input the X-axis name below.')
+        ],style = {'margin': '10px'}),     
+        dcc.Input(id='x_axis_title', value = 'Incubation Time', type = 'text')        
+    ],style = {'margin': '10px'}),
+    
+    html.Div([
+       html.P('Select Y-axis lower range'),
+       dcc.Slider(
+           id = 'primary-y-axis-lower-slider',
+           min = 0,
+           max = 100,
+           value = 0,
+           marks = {str(i):str(i) for i in range(0,100,5)}
+       ) 
+    ],style = {'width' : '50%'}),
+    html.Br(),
+    html.Div([
+       html.P('Select Y-axis upper range'),
+       dcc.Slider(
+           id = 'primary-y-axis-upper-slider',
+           min = 0,
+           max = 105,
+           value = 100,
+           marks = {str(i):str(i) for i in range(0,110,5)}
+       ) 
+    ],style = {'width' : '50%'}),
+    html.Br(),
+    html.Br(),
+    html.Div(
+        dcc.Graph(id=('output-data-upload')),
+        style = {'width' : '70%', 'height' : '250%', 'display' :'inline-block', 'position':'relative'}
+    ), 
+    
+    
+    #The second graph showing % modification of redundant peptides in the primary digestion file
+    html.Br(),
+    html.Div([
+        html.Div([
+           html.H4 ('Plot of % modifications. Plot below are redundant peptides in the primary digestion file.'),           
+            
+            html.P ('Select one peptide for ploting')
+        ]),
+        html.Div([
+           dcc.Dropdown(id = 'primary_redundant_pep_dropdown', style = {'width' : '68%', 'position':'relative'}),
+           dcc.RadioItems(
+               id = 'all_or_modified_redu_pep',
+               options = [{'label' : i, 'value' : i} for i in ['Show all peptides', 'Show peptides with modification(s)']],
+               value = 'Show all peptides',
+               labelStyle = {'display':'inline-block'}            
+           ),
+           html.P('Select X-axis scale'),
+           dcc.RadioItems(
+               id = 'redu_sel_x_axis_scale',
+               options = [{'label' : i, 'value' : i} for i in ['linear', 'log']],
+               value = 'linear',
+               labelStyle = {'display':'inline-block'}            
+           ),
+           html.P('Select Y-axis scale'),
+           dcc.RadioItems(
+               id = 'redu_sel_y_axis_scale',
+               options = [{'label' : i, 'value' : i} for i in ['linear', 'log']],
+               value = 'linear',
+               labelStyle = {'display':'inline-block'}            
+           ), 
+        ]),
+    ],style = {'margin': '10px'}),
+    
+    
+    html.Div([
+       html.P('Select Y-axis lower range'),
+       dcc.Slider(
+           id = 'redu-primary-y-axis-lower-slider',
+           min = 0,
+           max = 100,
+           value = 0,
+           marks = {str(i):str(i) for i in range(0,100,5)}
+       ) 
+    ],style = {'width' : '50%'}),
+    html.Br(),
+    html.Div([
+       html.P('Select Y-axis upper range'),
+       dcc.Slider(
+           id = 'redu-primary-y-axis-upper-slider',
+           min = 0,
+           max = 105,
+           value = 100,
+           marks = {str(i):str(i) for i in range(0,110,5)}
+       ) 
+    ],style = {'width' : '50%'}),
+    html.Br(),
+    html.Br(),
+    html.Div(
+        dcc.Graph(id=('redundant-pep-plot')),
+        style = {'width' : '70%', 'height' : '250%', 'display' :'inline-block', 'position':'relative'}
+    ), 
+    
+    
+    
+    
+    #The third graph showing % modification of gap-filling peptides in the secondary digestion file
+    html.Br(),
+    html.Div([
+        html.Div([
+           html.H4 ('Plot of % modifications. Plot below are gap-filling peptides selected in the secondary digestion file.'),           
+            
+            html.P ('Select one peptide for ploting')
+        ]),
+        html.Div([
+           dcc.Dropdown(id = 'gap_fill_pep_dropdown', style = {'width' : '68%', 'position':'relative'}),
+           dcc.RadioItems(
+               id = 'gap_fill_all_or_modified_pep',
+               options = [{'label' : i, 'value' : i} for i in ['Show all peptides', 'Show peptides with modification(s)']],
+               value = 'Show all peptides',
+               labelStyle = {'display':'inline-block'}            
+           ),
+           html.P('Select X-axis scale'),
+           dcc.RadioItems(
+               id = 'gap_fill_sel_x_axis_scale',
+               options = [{'label' : i, 'value' : i} for i in ['linear', 'log']],
+               value = 'linear',
+               labelStyle = {'display':'inline-block'}            
+           ),
+           html.P('Select Y-axis scale'),
+           dcc.RadioItems(
+               id = 'gap_fill_sel_y_axis_scale',
+               options = [{'label' : i, 'value' : i} for i in ['linear', 'log']],
+               value = 'linear',
+               labelStyle = {'display':'inline-block'}            
+           ), 
+        ]),
+    ],style = {'margin': '10px'}),
+    
+    
+    html.Div([
+       html.P('Select Y-axis lower range'),
+       dcc.Slider(
+           id = 'gap-fill-y-axis-lower-slider',
+           min = 0,
+           max = 100,
+           value = 0,
+           marks = {str(i):str(i) for i in range(0,100,5)}
+       ) 
+    ],style = {'width' : '50%'}),
+    html.Br(),
+    html.Div([
+       html.P('Select Y-axis upper range'),
+       dcc.Slider(
+           id = 'gap-fill-y-axis-upper-slider',
+           min = 0,
+           max = 105,
+           value = 100,
+           marks = {str(i):str(i) for i in range(0,110,5)}
+       ) 
+    ],style = {'width' : '50%'}),
+    html.Br(),
+    html.Br(),
+    html.Div(
+        dcc.Graph(id=('gap-fill-pep-plot')),
+        style = {'width' : '70%', 'height' : '250%', 'display' :'inline-block', 'position':'relative'}
+    ), 
+    
+    html.Br(),
+    html.Br(),
+    
+
+    # first table of peptides from primary digestion file for Gloabal Characterization Map Generation
+    html.Div([
+        html.H4('Table of peptides for Gloabal Characterization Map'),
+        html.P('Select "Yes" below for table generation'),
+        html.Div([
+            dcc.Dropdown(
+                id = 'table_generation',
+                value = 'No',
+                options = [{'label' : i, 'value' : i} for i in ['No', 'Yes']])
+        ],style = {'width':'20%', 'margin': '10px'})    
+    ], style =  {'margin': '10px', 'display' :'inline-block', 'position':'relative'}),
+    
+    html.Div([
+
+        html.P('Select amino acids and/or their modifications to filter the table'),
+        dcc.Dropdown(id = 'table_AA_dropdown', style = {'width' : '45%', 'position':'relative'}),
+        dcc.Dropdown(id = 'table_AA_mod_dropdown', style = {'width' : '45%', 'position':'relative'}),
+    ], style =  {'margin': '15px'}),
+    html.Div(id='table',style = {'margin': '10px'}),
+    html.Div(dt.DataTable(rows=[{}]), 
+             style={'display': 'none','margin': '10px','display' :'inline-block', 'position':'relative'}),
+    
+    html.Div([
+        html.P('If you want to download the (filtered) data table, input the file name below.'),
+        dcc.Input(id='download_table_filename', value = 'table_filename', type='text'),
+        html.Div(id = 'table_filename'),
+        html.Br(),
+        html.P('Select "Yes" below, if you want to download data table to local.'),
+        dcc.Dropdown(id = 'download_table_or_not', 
+                     value = 'No',
+                     options = [{'label':i, 'value':i} for i in ['No','Yes']],
+                     style = {'width' : '45%', 'position':'relative'})
+    ], style={'display': 'none','margin': '10px','display' :'inline-block', 'position':'relative'}),
+    html.Br(),
+    
+    #generate jmol code for global characterization map
+    html.Div([
+        html.H4('Generating Jmol code for a full view of Global Characterization map'),
+        html.Div([
+            html.P('Select "Yes" below for Jmol code generation'),
+            html.Div([
+                dcc.Dropdown(
+                    id = 'get_jmol_code_or_not',
+                    value = 'No',
+                    options = [{'label':i, 'value':i} for i in ['No','Yes']],
+                    style = {'width':'30%', 'margin': '15px'}
+                )
+            ])
+        ],style =  {'margin': '15px'}),
+        html.Div(id = 'subunit_code_prompt',style =  {'margin': '15px'}),
+        html.Div([dcc.Input(id='subunit_code_input', value = '', type = 'text'),
+                 html.Div(id = 'user_input_subunit_code')],
+                 style =  {'margin': '15px'}),
+#         html.Div(dash_table.DataTable(
+                     
+#                      id = 'subunit_code_DataTable',
+#                      columns = [{'name':'Protein', 'id':'Protein'}, 
+#                                 {'name':'PDB protein subunit code', 'id':'PDB-protein-subunit-code'}],
+            
+#                      editable = True
+#                  ),  
+#                  style = {'margin': '20px','width':'20%'}),
+        html.P('Optional: align your uploaded sequence to the XR-Crystallography sequence. Only work for 1HZH in current version.'
+              ,style =  {'margin': '15px'}),
+        dcc.Dropdown(
+            id = 'xr_crysal_alignment',
+            value = None,
+            options = [{'label':i, 'value':i} for i in ['1HZH Alignment',None]],
+            style = {'width':'30%', 'margin': '15px'}
+        ),
+        html.P('Select "Yes" if you are ready to generate the Jmol code for selected protein/subunit(s)',
+               style = { 'margin': '15px'}),
+        html.Div(
+            
+            
+            dcc.Dropdown(
+                id = 'ready_jmol_code_or_not',    
+                value = 'No',
+                options = [{'label':i, 'value':i} for i in ['No','Yes']],
+                style = {'width':'30%', 'margin': '15px'}
+                )
+        ),
+#         #this is a test
+#         html.Div(id = 'datatable-test'),
+#         #delete after finishing the test
+        
+       
+        #color gradient picture
+        html.Img (id = 'color_grad_img', height='340', width='92', style = {'margin': '20px'} ),
+        
+        #jmol code
+        html.Div(id = 'jmol_code', style = {'margin': '20px'})
+    ])
+    
+],style = {'margin': '10px'})
+
+
+
+def parse_contents(contents, filename, date):
+#     if contents is not None:
+    content_type, content_string = contents.split(',')
+
+    decoded = base64.b64decode(content_string)
+    try:
+        if 'csv' in filename:
+            # Assume that the user uploaded a CSV file
+            df = pd.read_csv(
+                io.StringIO(decoded.decode('utf-8')))
+            new_df = find_modifications(df)
+            new_df.columns=new_df.columns.astype(str)
+        elif 'xls' in filename:
+            # Assume that the user uploaded an excel file
+            df = pd.read_excel(io.BytesIO(decoded))
+            new_df = find_modifications(df)
+            new_df.columns=new_df.columns.astype(str)
+    except Exception as e:
+
+        return html.Div([
+            'There was an error processing this file.'
+        ])
+    
+    col_list=new_df.columns.tolist()
+    new_df.columns = new_df.columns.astype(str)
+    t_list = []
+    for t in new_df.columns:
+        if t[0] in '1234567890':
+            t_list.append(t)
+            col_list.remove(t)
+    t_list = list(map(float,t_list))
+    t_list.sort()
+    t_list = list(map(str, t_list))
+    for a in range(0,len(t_list)):
+        if int(t_list[a].split('.')[1]) == 0:
+            t_list[a] = t_list[a].split('.')[0]
+    col_list += t_list
+    new_df = new_df[col_list]
+    
+    return new_df 
+
+
+#dropdown for primary digest
+@app.callback(Output('primary_digest_dropdown', 'options'),
+              [Input('upload-data', 'contents')],
+              [State('upload-data', 'filename'),
+               State('upload-data', 'last_modified')])
+def update_primary_digest_dropdown (list_of_contents, list_of_names, list_of_dates):
+    if list_of_contents is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+
+        protein_list = df.Protein.unique().tolist()
+
+        return [ {'label' : i, 'value' : i} for i in protein_list]
+    else: return []
+
+#dropdown for secondary digest
+@app.callback(Output('secondary_digest_dropdown', 'options'),
+              [Input('upload-data_2', 'contents')],
+              [State('upload-data_2', 'filename'),
+               State('upload-data_2', 'last_modified')])
+def update_primary_digest_dropdown (list_of_contents, list_of_names, list_of_dates):
+    if list_of_contents is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+
+        protein_list = df.Protein.unique().tolist()
+
+        return [ {'label' : i, 'value' : i} for i in protein_list]
+    else: return []
+
+
+#dropdown for user selection of constant modification
+@app.callback(Output('sel_const_mod', 'options'),
+              [Input('upload-data', 'contents')],
+              [State('upload-data', 'filename'),
+               State('upload-data', 'last_modified')])
+def update_constant_modification_dropdown (list_of_contents, list_of_names, list_of_dates):
+    if list_of_contents is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+        dict_name = {}
+        for a in range(len(df.mod_name_mass)):
+            list2 = df.mod_name_mass[a].split(' ')
+            for b in list2:
+                dict_name[b]=''
+
+        dict_name.pop('')
+
+        dict1 = []
+        for c in dict_name.keys():
+            dict1.append(c)
+        return [ {'label' : i, 'value' : i} for i in dict1]
+    else: return []
+
+
+#dropdown for select peptides for plotting, user can choose to select among 
+#all filtered peptides with max coverage or only modified peptides filtered
+#for max coverage
+@app.callback(Output('primary_max_cov_pep_dropdown', 'options'),
+             [Input('upload-data', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('all_or_modified_pep','value'),
+              Input('sel_const_mod', 'value')],
+             [State('upload-data', 'filename'),
+               State('upload-data', 'last_modified')])
+def pep_selection (list_of_contents, 
+                   primary_digest_dropdown, 
+                   all_or_mod_pep,
+                   sel_const_mod,
+                   list_of_names, 
+                   list_of_dates):
+    if list_of_contents is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+
+        fil_df = sep_mod_pep (df, primary_digest_dropdown, all_or_mod_pep, sel_const_mod)
+
+        if all_or_mod_pep == 'Show all peptides':
+            pep_pos_seq_list = fil_df.loc[:,'pep_pos_seq'].unique()
+            return [ {'label' : i, 'value' : i} for i in pep_pos_seq_list]
+        if all_or_mod_pep == 'Show peptides with modification(s)':
+            pep_pos_seq_list = fil_df.loc[:,'pep_pos_mod'].unique()
+            return [ {'label' : i, 'value' : i} for i in pep_pos_seq_list]
+    else: return []
+    
+
+#callback for scatter plot of the pepitdes used for generation of global characterization file in the 
+# primary digestion file
+@app.callback(Output(('output-data-upload'), 'figure'),
+             [Input('upload-data', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('all_or_modified_pep','value'),
+              Input('sel_const_mod', 'value'),
+              Input('primary_max_cov_pep_dropdown', 'value'),
+              Input('x_axis_title','value'),
+              Input('sel_x_axis_scale','value'),
+              Input('sel_y_axis_scale','value'),
+              Input('primary-y-axis-lower-slider', 'value'),
+              Input('primary-y-axis-upper-slider', 'value')],
+             [State('upload-data', 'filename'),
+              State('upload-data', 'last_modified')])
+def update_output(list_of_contents, 
+                   primary_digest_dropdown, 
+                   all_or_mod_pep,
+                   sel_const_mod,
+                   user_select_pep,
+                   x_axis_title,
+                   x_axis_scale,
+                   y_axis_scale,
+                   y_axis_lower,
+                   y_axis_upper,
+                   list_of_names, 
+                   list_of_dates):
+    if list_of_contents is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+        fil_df = sep_mod_pep (df, primary_digest_dropdown, all_or_mod_pep, sel_const_mod)
+        peptide_name = user_select_pep
+        avg_std_mod_dict = get_percentage_modification_and_std (fil_df, peptide_name)[0]
+        avg_std_mod_time_points = get_percentage_modification_and_std (fil_df, peptide_name)[1]
+
+        traces = []
+        for i in avg_std_mod_dict.keys():
+
+            traces.append(go.Scatter(
+                x=avg_std_mod_time_points,
+                y=avg_std_mod_dict[i][0],
+                error_y=dict(
+                    type='data',
+                    array=avg_std_mod_dict[i][1],
+                    visible=True
+                ),
+                text=i,
+                mode='lines+markers',
+                opacity=0.6,
+                marker={
+                    'size': 15,
+                    'line': {'width': 0.5, 'color': 'white'}
+                },
+                name=i
+            ))
+
+        return {
+            'data': traces,
+            'layout': go.Layout(
+                xaxis={'type': x_axis_scale, 'title': x_axis_title, 'titlefont':{'size' : 20}},
+                yaxis={'type': y_axis_scale,'titlefont':{'size' : 20},'title': 'Percentage of modification (%)', 'range':[y_axis_lower,y_axis_upper]},
+                margin={'l': 40, 'b': 40, 't': 10, 'r': 10},
+                legend={'x': 1.1, 'y': 1},
+                hovermode='closest'
+            )
+        }
+    else: return {}
+
+'''
+second plot: redundant peptides in the primary digestion file
+'''
+
+#dropdown for select peptides for plotting, user can choose to select among 
+#all filtered peptides with max coverage or only modified peptides filtered
+#for max coverage
+@app.callback(Output('primary_redundant_pep_dropdown', 'options'),
+             [Input('upload-data', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('all_or_modified_redu_pep','value'),
+              Input('sel_const_mod', 'value')],
+             [State('upload-data', 'filename'),
+               State('upload-data', 'last_modified')])
+def pep_selection (list_of_contents, 
+                   primary_digest_dropdown, 
+                   all_or_mod_pep,
+                   sel_const_mod,
+                   list_of_names, 
+                   list_of_dates):
+    if list_of_contents is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+
+        fil_df = sep_mod_pep (df, primary_digest_dropdown, 'redundant', sel_const_mod)
+
+        if all_or_mod_pep == 'Show all peptides':
+            pep_pos_seq_list = fil_df.loc[:,'pep_pos_seq'].unique()
+            return [ {'label' : i, 'value' : i} for i in pep_pos_seq_list]
+        if all_or_mod_pep == 'Show peptides with modification(s)':
+            pep_pos_seq_list = fil_df.loc[:,'pep_pos_mod'].unique()
+            return [ {'label' : i, 'value' : i} for i in pep_pos_seq_list]
+    else: return []
+    
+
+#callback for scatter plot of the redundant pepitdes in the 
+# primary digestion file
+@app.callback(Output(('redundant-pep-plot'), 'figure'),
+             [Input('upload-data', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('all_or_modified_redu_pep','value'),
+              Input('sel_const_mod', 'value'),
+              Input('primary_redundant_pep_dropdown', 'value'),
+              Input('x_axis_title','value'),
+              Input('redu_sel_x_axis_scale','value'),
+              Input('redu_sel_y_axis_scale','value'),
+              Input('redu-primary-y-axis-lower-slider', 'value'),
+              Input('redu-primary-y-axis-upper-slider', 'value')],
+             [State('upload-data', 'filename'),
+              State('upload-data', 'last_modified')])
+def update_output(list_of_contents, 
+                   primary_digest_dropdown, 
+                   all_or_mod_pep,
+                   sel_const_mod,
+                   user_select_pep,
+                   x_axis_title,
+                   x_axis_scale,
+                   y_axis_scale,
+                   y_axis_lower,
+                   y_axis_upper,
+                   list_of_names, 
+                   list_of_dates):
+    if list_of_contents is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+        fil_df = sep_mod_pep (df, primary_digest_dropdown, 'redundant', sel_const_mod)
+        peptide_name = user_select_pep
+        avg_std_mod_dict = get_percentage_modification_and_std (fil_df, peptide_name)[0]
+        avg_std_mod_time_points = get_percentage_modification_and_std (fil_df, peptide_name)[1]
+
+        traces = []
+        for i in avg_std_mod_dict.keys():
+
+            traces.append(go.Scatter(
+                x=avg_std_mod_time_points,
+                y=avg_std_mod_dict[i][0],
+                error_y=dict(
+                    type='data',
+                    array=avg_std_mod_dict[i][1],
+                    visible=True
+                ),
+                text=i,
+                mode='lines+markers',
+                opacity=0.6,
+                marker={
+                    'size': 15,
+                    'line': {'width': 0.5, 'color': 'white'}
+                },
+                name=i
+            ))
+
+        return {
+            'data': traces,
+            'layout': go.Layout(
+                xaxis={'type': x_axis_scale, 'titlefont':{'size' : 20},'title': x_axis_title},
+                yaxis={'type': y_axis_scale,'titlefont':{'size' : 20},'title': 'Percentage of modification (%)', 'range':[y_axis_lower,y_axis_upper]},
+                margin={'l': 40, 'b': 40, 't': 10, 'r': 10},
+                legend={'x': 1.1, 'y': 1},
+                hovermode='closest'
+            )
+        }    
+    else: return {}
+    
+'''
+third plot: gap-filling peptides in the secondary digestion file
+'''
+
+#dropdown for selecting peptides for plotting, user can choose to select among 
+# all filtered gap-filling-peptides in the secondary digestion file 
+@app.callback(Output('gap_fill_pep_dropdown', 'options'),
+             [Input('upload-data', 'contents'),
+              Input('upload-data_2', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('secondary_digest_dropdown','value'),
+              Input('gap_fill_all_or_modified_pep','value'),
+              Input('sel_const_mod', 'value')],
+             [State('upload-data', 'filename'),
+               State('upload-data', 'last_modified'),
+              State('upload-data_2', 'filename'),
+               State('upload-data_2', 'last_modified')])
+def pep_selection (list_of_contents,
+                   list_of_contents_2,
+                   primary_digest_dropdown,
+                   secondary_digest_dropdown, 
+                   all_or_mod_pep,
+                   sel_const_mod,
+                   list_of_names, 
+                   list_of_dates, 
+                   list_of_names_2, 
+                   list_of_dates_2,):
+    if list_of_contents or list_of_contents_2 is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+        df2 = parse_contents(list_of_contents_2, list_of_names_2, list_of_dates_2)
+
+        fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+        fil_df2 = sep_mod_pep (df2, secondary_digest_dropdown, 'fun', sel_const_mod)
+
+        new = []
+        for a,b in zip(primary_digest_dropdown, secondary_digest_dropdown):
+            gap_fill_pep_list = []
+            gap_fill_pep_dict = fill_primary_gap_with_secondary (a, fil_df, b, fil_df2)
+            gap_fill_pep_dict_value = []
+            for x in gap_fill_pep_dict.values():
+                gap_fill_pep_dict_value.append(x)
+            for c in gap_fill_pep_dict_value:
+                for d in c:
+                    gap_fill_pep_list.append(d)
+            new_sec_df = filter_df_by_pos (fil_df2, gap_fill_pep_list)
+            new.append(new_sec_df)
+        new_fil_df2 = pd.concat(new)
+        new_fil_df2 = new_fil_df2.reset_index()
+        new_fil_df2 = new_fil_df2.drop('index', axis = 1)
+
+        if all_or_mod_pep == 'Show all peptides':
+            pep_pos_seq_list = new_fil_df2.loc[:,'pep_pos_seq'].unique()
+            return [ {'label' : i, 'value' : i} for i in pep_pos_seq_list]
+        if all_or_mod_pep == 'Show peptides with modification(s)':
+            pep_pos_seq_list = new_fil_df2.loc[:,'pep_pos_mod'].unique()
+            return [ {'label' : i, 'value' : i} for i in pep_pos_seq_list]    
+    else: return []
+
+#callback for scatter plot of the gap-filling peptides in the secondary file
+@app.callback(Output(('gap-fill-pep-plot'), 'figure'),
+             [Input('upload-data', 'contents'),
+              Input('upload-data_2', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('secondary_digest_dropdown','value'),
+              Input('sel_const_mod', 'value'),
+              Input('gap_fill_pep_dropdown', 'value'),
+              Input('x_axis_title','value'),
+              Input('gap_fill_sel_x_axis_scale','value'),
+              Input('gap_fill_sel_y_axis_scale','value'),
+              Input('gap-fill-y-axis-lower-slider', 'value'),
+              Input('gap-fill-y-axis-upper-slider', 'value')],
+             [State('upload-data', 'filename'),
+              State('upload-data', 'last_modified'),
+              State('upload-data_2', 'filename'),
+              State('upload-data_2', 'last_modified')])
+def update_output(list_of_contents,
+                  list_of_contents_2,
+                  primary_digest_dropdown,
+                  secondary_digest_dropdown,
+                  sel_const_mod,
+                  user_select_pep,
+                  x_axis_title,
+                  x_axis_scale,
+                  y_axis_scale,
+                  y_axis_lower,
+                  y_axis_upper,
+                  list_of_names, 
+                  list_of_dates,
+                  list_of_names_2, 
+                  list_of_dates_2):
+    if list_of_contents or list_of_contents_2 is not None:
+        df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+        df2 = parse_contents(list_of_contents_2, list_of_names_2, list_of_dates_2)
+
+        fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+        fil_df2 = sep_mod_pep (df2, secondary_digest_dropdown, 'fun', sel_const_mod)
+
+        new = []
+        for a,b in zip(primary_digest_dropdown, secondary_digest_dropdown):
+            gap_fill_pep_list = []
+            gap_fill_pep_dict = fill_primary_gap_with_secondary (a, fil_df, b, fil_df2)
+            gap_fill_pep_dict_value = []
+            for x in gap_fill_pep_dict.values():
+                gap_fill_pep_dict_value.append(x)
+            for c in gap_fill_pep_dict_value:
+                for d in c:
+                    gap_fill_pep_list.append(d)
+            new_sec_df = filter_df_by_pos (fil_df2, gap_fill_pep_list)
+            new.append(new_sec_df)
+        new_fil_df2 = pd.concat(new)
+        new_fil_df2 = new_fil_df2.reset_index()
+        new_fil_df2 = new_fil_df2.drop('index', axis = 1)
+        peptide_name = user_select_pep
+        avg_std_mod_dict = get_percentage_modification_and_std (new_fil_df2, peptide_name)[0]
+        avg_std_mod_time_points = get_percentage_modification_and_std (new_fil_df2, peptide_name)[1]
+
+        traces = []
+        for i in avg_std_mod_dict.keys():
+
+            traces.append(go.Scatter(
+                x=avg_std_mod_time_points,
+                y=avg_std_mod_dict[i][0],
+                error_y=dict(
+                    type='data',
+                    array=avg_std_mod_dict[i][1],
+                    visible=True
+                ),
+                text=i,
+                mode='lines+markers',
+                opacity=0.6,
+                marker={
+                    'size': 15,
+                    'line': {'width': 0.5, 'color': 'white'}
+                },
+                name=i
+            ))
+
+        return {
+            'data': traces,
+            'layout': go.Layout(
+                xaxis={'type': x_axis_scale, 'titlefont':{'size' : 20},'title': x_axis_title},
+                yaxis={'type': y_axis_scale,'titlefont':{'size' : 20},'title': 'Percentage of modification (%)', 'range':[y_axis_lower,y_axis_upper]},
+                margin={'l': 40, 'b': 40, 't': 10, 'r': 10},
+                legend={'x': 1.1, 'y': 1},
+                hovermode='closest'
+            )
+        }        
+    else: return {}
+
+
+
+# the following callbacks are for table generation-- select modified AA dropdown, select modification dropdown, 
+#    and table generation
+
+
+#this is a local method for dataframe filtering when user requires to generate the table
+# this method is only used in table generation callback
+
+def table_filtering (df, modified_AA_dropdown, modification_dropdown):
+    if modified_AA_dropdown is not None and modification_dropdown is None:
+        return df.loc[df.loc[:,'Modifications'].str.contains(modified_AA_dropdown)]
+    elif modified_AA_dropdown is not None and modification_dropdown is not None:
+        return df.loc[df.loc[:,'Modifications'].str.contains(modification_dropdown, regex=False)]    
+    elif modified_AA_dropdown is None and modification_dropdown is None:
+        return df
+
+
+
+#select a modified AA to filter the table 
+@app.callback(Output('table_AA_dropdown', 'options'),
+              [Input('upload-data', 'contents'),
+              Input('upload-data_2', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('secondary_digest_dropdown','value'),
+              Input('sel_const_mod', 'value'),
+              Input('table_generation','value')],
+             [State('upload-data', 'filename'),
+              State('upload-data', 'last_modified'),
+              State('upload-data_2', 'filename'),
+              State('upload-data_2', 'last_modified')])
+def mod_AA_dropdown  (list_of_contents,
+                      list_of_contents_2,
+                      primary_digest_dropdown,
+                      secondary_digest_dropdown,
+                      sel_const_mod,
+                      gen_table_or_not,
+                      list_of_names, 
+                      list_of_dates,
+                      list_of_names_2, 
+                      list_of_dates_2):
+   
+    if gen_table_or_not == 'Yes':
+        if list_of_contents_2 is not None:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            df2 = parse_contents(list_of_contents_2, list_of_names_2, list_of_dates_2)
+
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+            fil_df2 = sep_mod_pep (df2, secondary_digest_dropdown, 'fun', sel_const_mod)
+
+            new = [fil_df]
+            for a,b in zip(primary_digest_dropdown, secondary_digest_dropdown):
+                gap_fill_pep_list = []
+                gap_fill_pep_dict = fill_primary_gap_with_secondary (a, fil_df, b, fil_df2)
+                gap_fill_pep_dict_value = []
+                for x in gap_fill_pep_dict.values():
+                    gap_fill_pep_dict_value.append(x)
+                for c in gap_fill_pep_dict_value:
+                    for d in c:
+                        gap_fill_pep_list.append(d)
+                new_sec_df = filter_df_by_pos (fil_df2, gap_fill_pep_list)
+                new.append(new_sec_df)
+            new_fil_df2 = pd.concat(new)
+            new_fil_df2 = new_fil_df2.reset_index()
+            new_fil_df2 = new_fil_df2.drop('index', axis = 1)
+            AA_list = get_all_mod_list(new_fil_df2)[1]            
+
+            return [{'label' : i, 'value' : i} for i in AA_list]
+        else:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+
+
+            AA_list = get_all_mod_list(fil_df)[1]
+
+            return [{'label' : i, 'value' : i} for i in AA_list]
+        
+    else:
+        return[]
+    
+#take in an AA and select any one modification on that amino acid
+@app.callback(Output('table_AA_mod_dropdown', 'options'),
+              [Input('upload-data', 'contents'),
+              Input('upload-data_2', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('secondary_digest_dropdown','value'),
+              Input('sel_const_mod', 'value'),
+              Input('table_generation','value'), 
+              Input('table_AA_dropdown','value')],
+             [State('upload-data', 'filename'),
+              State('upload-data', 'last_modified'),
+              State('upload-data_2', 'filename'),
+              State('upload-data_2', 'last_modified')])
+def mod_AA_dropdown  (list_of_contents,
+                      list_of_contents_2,
+                      primary_digest_dropdown,
+                      secondary_digest_dropdown,
+                      sel_const_mod,
+                      gen_table_or_not,
+                      mod_AA,
+                      list_of_names, 
+                      list_of_dates,
+                      list_of_names_2, 
+                      list_of_dates_2):
+   
+    if gen_table_or_not == 'Yes':
+        if list_of_contents_2 is not None:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            df2 = parse_contents(list_of_contents_2, list_of_names_2, list_of_dates_2)
+
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+            fil_df2 = sep_mod_pep (df2, secondary_digest_dropdown, 'fun', sel_const_mod)
+
+            new = [fil_df]
+            for a,b in zip(primary_digest_dropdown, secondary_digest_dropdown):
+                gap_fill_pep_list = []
+                gap_fill_pep_dict = fill_primary_gap_with_secondary (a, fil_df, b, fil_df2)
+                gap_fill_pep_dict_value = []
+                for x in gap_fill_pep_dict.values():
+                    gap_fill_pep_dict_value.append(x)
+                for c in gap_fill_pep_dict_value:
+                    for d in c:
+                        gap_fill_pep_list.append(d)
+                new_sec_df = filter_df_by_pos (fil_df2, gap_fill_pep_list)
+                new.append(new_sec_df)
+            new_fil_df2 = pd.concat(new)
+            new_fil_df2 = new_fil_df2.reset_index()
+            new_fil_df2 = new_fil_df2.drop('index', axis = 1)
+            mod_AA_list = get_all_mod_list(new_fil_df2)[0]
+
+            mod_list = []
+
+            for e in mod_AA_list:
+                if e[0] == mod_AA:
+                    mod_list.append(e)
+            mod_list.append(None)
+            return [{'label' : i, 'value' : i} for i in mod_list]
+        else:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+
+            mod_AA_list = get_all_mod_list(fil_df)[0]
+            mod_list = []
+
+            for e in mod_AA_list:
+                if e[0] == mod_AA:
+                    mod_list.append(e)
+            mod_list.append(None)
+            
+            return [{'label' : i, 'value' : i} for i in mod_list]
+
+    else:
+        return[]
+    
+#callback for downloaded table file name
+@app.callback(Output('table_filename', 'children'),
+              [Input('download_table_filename','value')])
+def update_table_filename (input_value):
+    return 'You\'ve entered "{}"'.format(input_value)
+              
+
+    
+#callback table generation
+@app.callback(Output('table', 'children'),
+              [Input('upload-data', 'contents'),
+              Input('upload-data_2', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('secondary_digest_dropdown','value'),
+              Input('sel_const_mod', 'value'),
+              Input('x_axis_title','value'),
+              Input('table_generation','value'),
+              Input('table_AA_dropdown','value'),
+              Input('table_AA_mod_dropdown','value'),
+              Input('download_table_filename','value'),
+              Input('download_table_or_not','value')],
+             [State('upload-data', 'filename'),
+              State('upload-data', 'last_modified'),
+              State('upload-data_2', 'filename'),
+              State('upload-data_2', 'last_modified')])
+def table_generation (list_of_contents,
+                      list_of_contents_2,
+                      primary_digest_dropdown,
+                      secondary_digest_dropdown,
+                      sel_const_mod,
+                      x_axis_title,
+                      gen_table_or_not,
+                      sel_AA_dropdown,
+                      sel_mod_dropdown,
+                      download_table_filename,
+                      download_table_or_not,
+                      list_of_names, 
+                      list_of_dates,
+                      list_of_names_2, 
+                      list_of_dates_2):
+    #if user choose to generate the table, a table will be returned
+    if gen_table_or_not == 'Yes':
+        if list_of_contents_2 is not None:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            df2 = parse_contents(list_of_contents_2, list_of_names_2, list_of_dates_2)
+
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+            fil_df2 = sep_mod_pep (df2, secondary_digest_dropdown, 'fun', sel_const_mod)
+
+            new = [fil_df]
+            for a,b in zip(primary_digest_dropdown, secondary_digest_dropdown):
+                gap_fill_pep_list = []
+                gap_fill_pep_dict = fill_primary_gap_with_secondary (a, fil_df, b, fil_df2)
+                gap_fill_pep_dict_value = []
+                for x in gap_fill_pep_dict.values():
+                    gap_fill_pep_dict_value.append(x)
+                for c in gap_fill_pep_dict_value:
+                    for d in c:
+                        gap_fill_pep_list.append(d)
+                new_sec_df = filter_df_by_pos (fil_df2, gap_fill_pep_list)
+                new.append(new_sec_df)
+            new_fil_df2 = pd.concat(new)
+            new_fil_df2 = new_fil_df2.reset_index()
+            new_fil_df2 = new_fil_df2.drop('index', axis = 1)
+            new_df = make_new_df_for_table (new_fil_df2, x_axis_title)[0]
+            
+            #table filtering
+            new_df = table_filtering (new_df, sel_AA_dropdown, sel_mod_dropdown)
+            #delete the table filtering for the jmol code generation 
+            
+            #download the filtered datatable
+            if download_table_or_not== 'Yes':
+                new_df.to_csv(download_table_filename+'.csv', encoding='utf-8', index=False)
+            
+            return dt.DataTable(rows=new_df.to_dict('records'))
+    
+        else:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+            
+            
+            new_df = make_new_df_for_table (fil_df, x_axis_title)[0]
+            
+            #table flitering
+            new_df = table_filtering (new_df, sel_AA_dropdown, sel_mod_dropdown)    
+            #delete the table filtering for the jmol code generation 
+            
+            #download the filtered datatable
+            if download_table_or_not== 'Yes':
+                new_df.to_csv(download_table_filename+'.csv', encoding='utf-8', index=False)
+            
+            return dt.DataTable(rows=new_df.to_dict('records'))
+    else:
+        return []
+               
+
+        
+'''
+Purpose: local method for jmol code RGB color code generation
+Input: a float [0,1]
+Output: RGB RGB number in list
+'''        
+def color_convertor (percentage_modification):
+    var = percentage_modification/100
+    RGB=cm.rainbow(var)
+    R = int(RGB[0]*255)
+    G = int(RGB[1]*255)
+    B = int(RGB[2]*255)
+    
+    return [R,G,B]         
+        
+'''
+Purpose: generate Jmol code for input data file
+Input: df: dataframe exactly the same as the table df;
+       chain_code_dict: a dictionary with protein subunits as keys and PDF chain code as values
+           example: 
+           {'Anti-HER2-heavy:heavy-chain-Anti-HER2':['h','k'], 'Anti-HER2-light:Anti-HER2-light chain':['l','m'],}
+Usage: gen_jmol_code (new_df, 
+            {'Anti-HER2-heavy:heavy-chain-Anti-HER2':['h','k'], 'Anti-HER2-light:Anti-HER2-light chain':['l','m'],})  
+'''        
+
+def gen_jmol_code (df, chain_code_dict):
+    code = ''
+    a = ('select all\n' 
+                'color none\n'
+                'center all\n'
+                'wireframe off\n'
+                'spacefill off\n'
+                'ribbons off\n'
+                'backbone off\n'
+                'strands off\n'
+                'cartoons off\n'
+                'trace off\n'
+                'dots off\n'
+                'label off\n'
+                'SSbonds off\n'
+                'hbonds off\n'
+                'monitor off\n'
+                'slab off\n'
+                'set echo off\n'
+                'set hbonds sidechain\n'
+                'set ssbonds sidechain\n'
+                '\n'
+                'select protein\n'
+                'cartoons on\n'
+                'background [255, 255, 255]\n'
+                'select protein\n'
+                'color [128, 128, 128]\n'
+                '\n')
+    for timepoint in df.columns:
+        if 'mean (stdev)' in timepoint:
+            code+=timepoint.replace(' (stdev)','')
+            code+='\n'
+            code+='***********************************************\n'
+            code+='paste the code below to Jmol\n'
+            code+='\n'
+            code+=a
+            jmol_code = ''
+            #get subunit names frome chain_code_dict the keys are subunit_name1_primary : subunit_name1_secondary
+            for chains in chain_code_dict.keys():
+                #if chain_list stores subunit names from just primary digestion file
+                # put chains in a list
+                #else chain_list store different subunit names in primary and secondary  
+                # digestion file for the same protein
+                if ':' in chains:
+                    chain_list = chains.split(':')
+                else: 
+                    chain_list = [chains]
+                #if protein names in the df is the same as names in the chain_list, put the filtered df in the df_list
+                df_list = []
+                for chain in chain_list:
+                    chain_df = df.loc[df.loc[:,'Protein'] == chain]
+                    df_list.append(chain_df)
+                #chains_df stores df of a subunit in the primary and secondary digestion file
+                chains_df = pd.concat(df_list)
+                chains_df = chains_df.reset_index()
+                chains_df = chains_df.drop('index', axis = 1)
+                
+                for codes in chain_code_dict[chains]:
+                    for i in chains_df.index:
+                        percent_mod = chains_df.loc[i,timepoint].split(' +/- ')[0]
+                        color = str(color_convertor (float(percent_mod)))
+                        jmol_code += ('select ' + str(chains_df.loc[i,'Begin Pos']) 
+                            + '-' + str(chains_df.loc[i,'End Pos']) + ':' + codes + '\n')
+                        jmol_code += ('color' + color + '\n')
+                code+=jmol_code
+            code+='\n'
+            code+='paste the code above to Jmol\n\n'
+            code+='***********************************************\n'
+    return code
+
+# #callback for jmol subunit code selection DataTable
+# @app.callback(Output('subunit_code_DataTable', 'data'),
+#              [Input('primary_digest_dropdown','value')])
+# def subunit_code_table_generation (primary_digest_dropdown):
+#     return [{'Protein' : primary_digest_dropdown[i]} for i in range (len(primary_digest_dropdown))]
+
+
+# #testing taking the subunit code from user input
+# @app.callback(Output('datatable-test', 'children'),
+#              [Input('subunit_code_DataTable','data'),
+#               Input('subunit_code_DataTable','columns')])
+# def test_datatable (rows, columns):
+#     df = pd.DataFrame (rows, columns = [c['name'] for c in columns])
+#     print (df)
+#     code = ''
+#     for i in df.index:
+#         code+=str(df['PDB protein subunit code'][i]) 
+#     return html.H4(code)
+
+@app.callback(Output('subunit_code_prompt','children'),
+             [Input('primary_digest_dropdown','value'),
+             Input('get_jmol_code_or_not','value')])
+def subunit_code_prompt (primary_digest_dropdown,get_jmol_code_or_not):
+    if get_jmol_code_or_not == 'Yes':
+        prompt = 'Type the PDB file subunit code for '
+        if len(primary_digest_dropdown) == 1:
+            prompt += primary_digest_dropdown[0]+'.'
+        elif len(primary_digest_dropdown) > 1: 
+            for subunit in primary_digest_dropdown[0:len(primary_digest_dropdown)-1]:
+                prompt+=subunit+' and '
+            prompt += primary_digest_dropdown[-1] + ' separated each subunit by ";".'
+        return [html.P(prompt),
+                html.P('For example, PDB file 1HZH have heavy chain as "  h,k  " and light chain as "  l,m  " .Type below "  hk;lm   " in the same sequence as protein subunit above.'),
+               ]
+    else: return ''
+    
+
+@app.callback(Output('user_input_subunit_code','children'),
+             [Input('get_jmol_code_or_not','value'), 
+             Input('subunit_code_input','value'),
+             Input('primary_digest_dropdown','value')])
+def subnit_code_user_input(get_jmol_code_or_not, subunit_code_input, primary_digest_dropdown):
+    if get_jmol_code_or_not == 'Yes':
+        if len(primary_digest_dropdown) == 1 and ';' in subunit_code_input:
+            return 'You\'ve selected one subunit or protein. You shouldn\'t have ";" in the blank above.'
+        elif len(primary_digest_dropdown) >1 and ';' not in subunit_code_input:
+            return 'You\'ve selected multiple proteins or subunits. You should have ";" separating subnuit letter codes.'
+        else: 
+            return 'You\'ve entered "{}"'.format(subunit_code_input)
+    else: return ''
+
+
+#return the color gradient image
+@app.callback(Output('color_grad_img','src'),
+             [Input('ready_jmol_code_or_not','value')])
+def color_gradient_image (ready_jmol_code):
+    if ready_jmol_code == 'Yes':
+        return 'https://raw.githubusercontent.com/YaoChen1/Hello-world/master/color_gradient.png'
+    else: return None
+    
+    
+#callback for Jmol code generation
+@app.callback(Output('jmol_code', 'children'),
+              [Input('upload-data', 'contents'),
+              Input('upload-data_2', 'contents'),
+              Input('primary_digest_dropdown','value'),
+              Input('secondary_digest_dropdown','value'),
+              Input('sel_const_mod', 'value'),
+              Input('x_axis_title','value'),
+              Input('ready_jmol_code_or_not','value'),
+              Input('subunit_code_input', 'value'),
+              Input ('xr_crysal_alignment', 'value')
+#               Input('table_AA_dropdown','value'),
+#               Input('table_AA_mod_dropdown','value')
+              ],
+             [State('upload-data', 'filename'),
+              State('upload-data', 'last_modified'),
+              State('upload-data_2', 'filename'),
+              State('upload-data_2', 'last_modified')])
+def table_generation (list_of_contents,
+                      list_of_contents_2,
+                      primary_digest_dropdown,
+                      secondary_digest_dropdown,
+                      sel_const_mod,
+                      x_axis_title,
+                      get_jmol_code_or_not,
+                      subunit_code_input,
+                      xr_crysal_alignment,
+#                       sel_AA_dropdown,
+#                       sel_mod_dropdown,
+                      list_of_names, 
+                      list_of_dates,
+                      list_of_names_2, 
+                      list_of_dates_2):
+    #if user choose to generate the table, a table will be returned
+    if get_jmol_code_or_not == 'Yes':
+        if list_of_contents_2 is not None:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            df2 = parse_contents(list_of_contents_2, list_of_names_2, list_of_dates_2)
+
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+            fil_df2 = sep_mod_pep (df2, secondary_digest_dropdown, 'fun', sel_const_mod)
+
+            new = [fil_df]
+            for a,b in zip(primary_digest_dropdown, secondary_digest_dropdown):
+                gap_fill_pep_list = []
+                gap_fill_pep_dict = fill_primary_gap_with_secondary (a, fil_df, b, fil_df2)
+                gap_fill_pep_dict_value = []
+                for x in gap_fill_pep_dict.values():
+                    gap_fill_pep_dict_value.append(x)
+                for c in gap_fill_pep_dict_value:
+                    for d in c:
+                        gap_fill_pep_list.append(d)
+                new_sec_df = filter_df_by_pos (fil_df2, gap_fill_pep_list)
+                new.append(new_sec_df)
+            new_fil_df2 = pd.concat(new)
+            new_fil_df2 = new_fil_df2.reset_index()
+            new_fil_df2 = new_fil_df2.drop('index', axis = 1)
+            new_df = make_new_df_for_table (new_fil_df2, x_axis_title)[0]
+            
+            
+            #sequence alignment 
+            if xr_crysal_alignment =='1HZH Alignment':
+                new_df = sequence_align(new_df)
+            
+            jmol_dict = {}
+            chain_list = []
+            code_list = []
+            for a,b in zip (primary_digest_dropdown,secondary_digest_dropdown):
+                chain_list.append(a+':'+b)
+            if ';' in subunit_code_input:
+                for codes in subunit_code_input.split(';'):
+                    temp = []
+                    for code in codes:
+                        if code.lower() in 'abcdefghijklmnopqrstuvwxyz':
+                            temp.append(code.lower())  
+                    code_list.append(temp)
+            else: 
+                temp = []
+                for code in subunit_code_input:
+                    if code.lower() in 'abcdefghijklmnopqrstuvwxyz':
+                            temp.append(code.lower())  
+                code_list.append(temp)
+                
+            for c,d in zip (chain_list, code_list):
+                jmol_dict[c] = d
+            
+            return html.Pre(gen_jmol_code (new_df, jmol_dict))
+               
+#             return html.Pre(gen_jmol_code (new_df, 
+#             {'Anti-HER2-heavy:heavy-chain-Anti-HER2':['h','k'], 'Anti-HER2-light:Anti-HER2-light chain':['l','m'],})
+#                                )
+    
+        else:
+            df = parse_contents(list_of_contents, list_of_names, list_of_dates)
+            fil_df = sep_mod_pep (df, primary_digest_dropdown, 'have', sel_const_mod)
+            
+            
+            new_df = make_new_df_for_table (fil_df, x_axis_title)[0]
+            
+            #sequence alignment very very fast!!
+            if xr_crysal_alignment =='1HZH Alignment':
+                new_df = sequence_align(new_df)
+            
+            jmol_dict = {}
+#             chain_list = []
+            code_list = []
+#             for a,b in zip (primary_digest_dropdown,secondary_digest_dropdown):
+#                 chain_list.append(a+':'+b)
+            if ';' in subunit_code_input:
+                for codes in subunit_code_input.split(';'):
+                    temp = []
+                    for code in codes:
+                        if code.lower() in 'abcdefghijklmnopqrstuvwxyz':
+                            temp.append(code.lower())  
+                    code_list.append(temp)
+            else: 
+                temp = []
+                for code in subunit_code_input:
+                    if code.lower() in 'abcdefghijklmnopqrstuvwxyz':
+                            temp.append(code.lower())  
+                code_list.append(temp)
+                
+            for c,d in zip (primary_digest_dropdown, code_list):
+                jmol_dict[c] = d
+            
+            return html.Pre(gen_jmol_code (new_df, jmol_dict))
+            
+#             return html.Pre(gen_jmol_code (new_df, 
+#             {'Anti-HER2-heavy:heavy-chain-Anti-HER2':['h','k'], 'Anti-HER2-light:Anti-HER2-light chain':['l','m'],})
+#                                )
+    else:
+        return []
+                
+    
+if __name__ == '__main__':
+    webbrowser.open_new('http://127.0.0.1:8050/')
+    app.run_server(debug=False)
