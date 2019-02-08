@@ -48,6 +48,6 @@ https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/tree/ma
 ### Supplemental Recources
 
 - Jmol is needed for visualizaiton of the 3-D molecular model of modified protein 
- - http://jmol.sourceforge.net/
+   - http://jmol.sourceforge.net/
 - Download the protein X-ray crystallography data from Protein Data Bank
- - https://www.rcsb.org/
+   - https://www.rcsb.org/
