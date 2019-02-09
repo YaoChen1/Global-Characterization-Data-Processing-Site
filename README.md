@@ -37,7 +37,10 @@ https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/tree/ma
 
 ### Skyline Report Template
 
-After 
+Generate the Skyline report using the following format to import to Global Characterization Data Processing Site
+```
+https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/blob/master/Skyline%20data%20processing%20template/Skyline%20Report%20template.skyr
+```
 
 ### Testing Data
 
