@@ -7,6 +7,10 @@ This is a universally applicable customized program for protein post-translation
 
 ![alt text](https://github.com/YaoChen1/Hello-world/blob/master/work%20flow.png)
 
+### Video Tutorial
+
+[Tutorial: How to use Global Characterization Data Processing Site for rapid modification analysis](https://youtu.be/atwfpfsiB5w)
+
 ### Running environment
 - Python 3.6 or higher
 - Microsoft Windows 7 or higher
