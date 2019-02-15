@@ -63,3 +63,8 @@ https://github.com/YaoChen1/Global-Characterization-Data-Processing-Site/tree/ma
 - Download the protein X-ray crystallography data from Protein Data Bank
    - https://www.rcsb.org/
 
+### Please don't hesitate to contact the author
+
+- Ask questions about the project or provide suggestions on how to make the Global Characterization Site easier to use
+  - chenyao.emporia@gmail.com
+- This is a one person project and I have my day job, apologies ahead for any delays ^_^
