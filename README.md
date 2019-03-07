@@ -20,7 +20,6 @@ This is a universally applicable customized program for protein post-translation
 
 Before running the code contained in "Automatic Data Processing", install the following packages:
 ```
-pip install webbrowser
 pip install dash==0.36.0
 pip install dash-html-components==0.13.5 
 pip install dash-core-components==0.43.0
