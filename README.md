@@ -1,5 +1,5 @@
 # Global-Characterization-Data-Processing-Site V0.1 *beta*
- This repository is a source code depo for the manuscript "Rapid Global Characterization of Human IgG1 under Oxidative Stresses "
+ This repository is a source code depo for the manuscript "Rapid Global Characterization of Human IgG1 Following Oxidative Stresses "
 
 ### Introduction:
 
