@@ -1,9 +1,8 @@
 '''
 Author: Yao Chen
 Version: Last updated 1/17/2019
-Note: this code is an attachment of Yao Chen's first author publication: Rapid Global Characterization 
-        of Human IgG1 under Oxidative Stresses — Combining dual independent protease digestions and LC-HRMS 
-        DIA and DDA
+Note: this code is an attachment of Yao Chen's first author publication: Rapid Global Characterization of Human IgG1
+        Following Oxidiative Stresses
 Funtion: "Following peptide-matching in Skyline templates, all transitions were processed by Global Characterization 
     Site—an universal data processing application for protein modifications—which is capable of processing data of 
     proteins digested by any digestive enzymes (or any co-digestions), proteins with any number of subunits, and any 
