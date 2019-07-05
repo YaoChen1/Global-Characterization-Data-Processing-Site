@@ -1,11 +1,15 @@
 # Global-Characterization-Data-Processing-Site V0.1 *beta*
- This repository is a source code depo for the manuscript "Rapid Global Characterization of Human IgG1 Following Oxidative Stresses "
+ This repository is a source code depo for the manuscript "Rapid global characterization of immunoglobulin G1 following oxidative stress "
 
 ### Introduction:
 
 This is a universally applicable customized program for protein post-translational modification (PTM) data processing. It accepts raw data output from Skyline (https://skyline.ms/), plots modification trends for peptides, generates sortable and downloadable modification tables, and produces Jmol code for 3-dimentional structural models of the analyzed protein.  
 
 ![alt text](https://github.com/YaoChen1/Hello-world/blob/master/work%20flow.png)
+
+### Open access article 
+
+[Rapid global characterization of immunoglobulin G1 following oxidative stress](https://www.tandfonline.com/doi/full/10.1080/19420862.2019.1625676)
 
 ### Video Tutorial
 
